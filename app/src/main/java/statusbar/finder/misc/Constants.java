@@ -6,6 +6,7 @@ public class Constants {
     public static final String PREFERENCE_KEY_REQUIRE_TRANSLATE = "require_translate";
     public static final String PREFERENCE_KEY_ABOUT = "about";
     public static final String PREFERENCE_KEY_TARGET_PACKAGES = "target_packages";
+    public static final String PREFERENCE_KEY_PACKAGES_ICONS = "packages_icons";
 
     public static final String NOTIFICATION_CHANNEL_LRC = "lrc";
 

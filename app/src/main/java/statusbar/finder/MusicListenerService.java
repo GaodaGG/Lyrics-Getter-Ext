@@ -1,5 +1,7 @@
 package statusbar.finder;
 
+import static statusbar.finder.misc.Constants.PREFERENCE_KEY_REQUIRE_TRANSLATE;
+
 import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationManager;
@@ -9,6 +11,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
 import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSessionManager;
@@ -21,11 +24,18 @@ import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.text.TextUtils;
 import android.util.Log;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 import androidx.lifecycle.Observer;
 import androidx.preference.PreferenceManager;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+
 import cn.lyric.getter.api.API;
 import cn.lyric.getter.api.data.ExtraData;
 import cn.lyric.getter.api.tools.Tools;
@@ -37,47 +47,46 @@ import statusbar.finder.livedata.LyricsChanged;
 import statusbar.finder.misc.Constants;
 import statusbar.finder.provider.ILrcProvider;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Locale;
-import java.util.Objects;
-
-import static statusbar.finder.misc.Constants.PREFERENCE_KEY_REQUIRE_TRANSLATE;
-
 public class MusicListenerService extends NotificationListenerService {
 
+    @SuppressLint("ConstantLocale")
+    public final static String systemLanguage = Locale.getDefault().getLanguage() + "-" + Locale.getDefault().getCountry();
     private static final int NOTIFICATION_ID_LRC = 1;
-
     private static final int MSG_LYRIC_UPDATE_DONE = 2;
-
+    public static MusicListenerService instance;
+    private final ArrayList<String> mTargetPackageList = new ArrayList<>();
+    public String musicinfo;
     private MediaSessionManager mMediaSessionManager;
     private MediaController mMediaController;
     private NotificationManager mNotificationManager;
-
-    private final ArrayList<String> mTargetPackageList = new ArrayList<>();
     private Observer<Void> mAppsListChangedObserver;
     private Observer<GetResult.Data> mGetResultObserver;
-
     private SharedPreferences mSharedPreferences;
-
     private Lyric mLyric;
     private String requiredLrcTitle;
     private Notification mLyricNotification;
     private GetResult.Data mCurrentResult;
     private ILrcProvider.MediaInfo mCurrentMediaInfo;
     private long mLastSentenceFromTime = -1;
-
-    @SuppressLint("ConstantLocale")
-    public final static String systemLanguage = Locale.getDefault().getLanguage() + "-" + Locale.getDefault().getCountry();
     private String drawBase64;
+    private String playPackageName;
     private Thread curLrcUpdateThread;
     private API lyricsGetterApi;
-    public static MusicListenerService instance;
     private SharedPreferences offsetpreferences;
     private SharedPreferences translationstatusreferences;
-    public String musicinfo;
 
-    private final Handler mHandler = new Handler(Objects.requireNonNull(Looper.myLooper())) {
+    public MusicListenerService() {
+    }
+
+    private int getMediaControllerPlaybackState(MediaController controller) {
+        if (controller != null) {
+            final PlaybackState playbackState = controller.getPlaybackState();
+            if (playbackState != null) {
+                return playbackState.getState();
+            }
+        }
+        return PlaybackState.STATE_NONE;
+    }    private final Handler mHandler = new Handler(Objects.requireNonNull(Looper.myLooper())) {
         @Override
         public void handleMessage(@NonNull Message msg) {
             super.handleMessage(msg);
@@ -90,7 +99,78 @@ public class MusicListenerService extends NotificationListenerService {
         }
     };
 
-    private final Runnable mLyricUpdateRunnable = new Runnable() {
+    private String getIcon(String packageName) {
+        String string = mSharedPreferences.getString(Constants.PREFERENCE_KEY_PACKAGES_ICONS, "");
+        if (string.isEmpty()) return null;
+        String[] split = string.split(";");
+        for (String s : split) {
+            String[] split1 = s.split(":");
+            if (split1[0].equals(packageName)) return split1[1];
+        }
+        return null;
+    }
+
+    @Override
+    public void onNotificationPosted(StatusBarNotification sbn) {
+        Notification notification = sbn.getNotification();
+        if (!notification.extras.containsKey(Notification.EXTRA_MEDIA_SESSION) &&
+                !mTargetPackageList.contains(sbn.getPackageName())) {
+            drawBase64 = Tools.INSTANCE.drawableToBase64(getDrawable(R.drawable.ic_statusbar_icon));
+            return;
+        }
+
+        Log.d("Media Package Name: ", sbn.getPackageName());
+
+        String base64Icon = getIcon(sbn.getPackageName());
+        playPackageName = sbn.getPackageName();
+        if (base64Icon != null) {
+            drawBase64 = base64Icon;
+        } else {
+            drawBase64 = Tools.INSTANCE.drawableToBase64(getDrawable(R.drawable.ic_statusbar_icon));
+        }
+//            if (sbn.isClearable()){
+//                if (notification != null) {
+//                    String lyricText = String.format("%s : %s", notification.extras.getString(Notification.EXTRA_TITLE), notification.extras.getString(Notification.EXTRA_TEXT));
+//                    lyricsGetterApi.sendLyric(lyricText,new ExtraData(
+//                            true,
+//                            drawBase64,
+//                            false,
+//                            getPackageName(),
+//                            0
+//                    ));
+//                }
+//        }
+    }
+
+    @SuppressLint("UseCompatLoadingForDrawables")
+    @Override
+    public void onListenerConnected() {
+        super.onListenerConnected();
+        instance = this;
+        offsetpreferences = getSharedPreferences("offset", MODE_PRIVATE);
+        translationstatusreferences = getSharedPreferences("translationstatus", MODE_PRIVATE);
+        lyricsGetterApi = new API();
+        drawBase64 = Tools.INSTANCE.drawableToBase64(getDrawable(R.drawable.ic_statusbar_icon));
+        // Log.d("systemLanguage", systemLanguage);
+        mSharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
+        mNotificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        mLyricNotification = buildLrcNotification();
+        mMediaSessionManager = (MediaSessionManager) getSystemService(Context.MEDIA_SESSION_SERVICE);
+        mAppsListChangedObserver = data -> {
+            updateTargetPackageList();
+            bindMediaListeners();
+        };
+
+        mGetResultObserver = data -> {
+            mCurrentResult = data;
+            mLyricNotification = buildLrcNotification(data);
+            mNotificationManager.notify(NOTIFICATION_ID_LRC, mLyricNotification);
+        };
+        AppsListChanged.getInstance().observeForever(mAppsListChangedObserver);
+        GetResult.getInstance().observeForever(mGetResultObserver);
+        updateTargetPackageList();
+        bindMediaListeners();
+    }    private final Runnable mLyricUpdateRunnable = new Runnable() {
         @Override
         public void run() {
             if (mMediaController == null || Objects.requireNonNull(mMediaController.getPlaybackState()).getState() != PlaybackState.STATE_PLAYING) {
@@ -102,7 +182,18 @@ public class MusicListenerService extends NotificationListenerService {
         }
     };
 
-    private final MediaController.Callback mMediaCallback = new MediaController.Callback() {
+    @Override
+    public void onListenerDisconnected() {
+        stopLyric();
+        unBindMediaListeners();
+        AppsListChanged.getInstance().removeObserver(mAppsListChangedObserver);
+        GetResult.getInstance().removeObserver(mGetResultObserver);
+        super.onListenerDisconnected();
+    }
+
+    private Notification buildLrcNotification() {
+        return buildLrcNotification(null);
+    }    private final MediaController.Callback mMediaCallback = new MediaController.Callback() {
         @Override
         public void onPlaybackStateChanged(@Nullable PlaybackState state) {
             super.onPlaybackStateChanged(state);
@@ -137,99 +228,6 @@ public class MusicListenerService extends NotificationListenerService {
         }
     };
 
-    private final MediaSessionManager.OnActiveSessionsChangedListener onActiveSessionsChangedListener = new MediaSessionManager.OnActiveSessionsChangedListener() {
-        @Override
-        public void onActiveSessionsChanged(@Nullable List<MediaController> controllers) {
-            if (mMediaController != null) mMediaController.unregisterCallback(mMediaCallback);
-            if (controllers == null) return;
-            for (MediaController controller : controllers) {
-                if (!mTargetPackageList.contains(controller.getPackageName())) continue;
-                if (getMediaControllerPlaybackState(controller) == PlaybackState.STATE_PLAYING) {
-                    mMediaController = controller;
-                    break;
-                }
-            }
-            if (mMediaController != null) {
-                mMediaController.registerCallback(mMediaCallback);
-                mMediaCallback.onMetadataChanged(mMediaController.getMetadata());
-                mMediaCallback.onPlaybackStateChanged(mMediaController.getPlaybackState());
-            }
-        }
-    };
-
-    private int getMediaControllerPlaybackState(MediaController controller) {
-        if (controller != null) {
-            final PlaybackState playbackState = controller.getPlaybackState();
-            if (playbackState != null) {
-                return playbackState.getState();
-            }
-        }
-        return PlaybackState.STATE_NONE;
-    }
-
-    public MusicListenerService() {
-    }
-
-    @Override
-    public void onNotificationPosted(StatusBarNotification sbn) {
-//        Notification notification = sbn.getNotification();
-//            if (sbn.isClearable()){
-//                if (notification != null) {
-//                    String lyricText = String.format("%s : %s", notification.extras.getString(Notification.EXTRA_TITLE), notification.extras.getString(Notification.EXTRA_TEXT));
-//                    lyricsGetterApi.sendLyric(lyricText,new ExtraData(
-//                            true,
-//                            drawBase64,
-//                            false,
-//                            getPackageName(),
-//                            0
-//                    ));
-//                }
-//        }
-    }
-
-    @SuppressLint("UseCompatLoadingForDrawables")
-    @Override
-    public void onListenerConnected() {
-        super.onListenerConnected();
-        instance = this;
-        offsetpreferences = getSharedPreferences("offset", MODE_PRIVATE);
-        translationstatusreferences = getSharedPreferences("translationstatus", MODE_PRIVATE);
-        lyricsGetterApi = new API();
-        drawBase64 = Tools.INSTANCE.drawableToBase64(getDrawable(R.drawable.ic_statusbar_icon));
-        // Log.d("systemLanguage", systemLanguage);
-        mSharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
-        mNotificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        mLyricNotification = buildLrcNotification();
-        mMediaSessionManager = (MediaSessionManager) getSystemService(Context.MEDIA_SESSION_SERVICE);
-        mAppsListChangedObserver = data -> {
-             updateTargetPackageList();
-             bindMediaListeners();
-        };
-
-        mGetResultObserver = data -> {
-            mCurrentResult = data;
-            mLyricNotification = buildLrcNotification(data);
-            mNotificationManager.notify(NOTIFICATION_ID_LRC, mLyricNotification);
-        };
-        AppsListChanged.getInstance().observeForever(mAppsListChangedObserver);
-        GetResult.getInstance().observeForever(mGetResultObserver);
-        updateTargetPackageList();
-        bindMediaListeners();
-    }
-
-    @Override
-    public void onListenerDisconnected() {
-        stopLyric();
-        unBindMediaListeners();
-        AppsListChanged.getInstance().removeObserver(mAppsListChangedObserver);
-        GetResult.getInstance().removeObserver(mGetResultObserver);
-        super.onListenerDisconnected();
-    }
-
-    private Notification buildLrcNotification() {
-        return buildLrcNotification(null);
-    }
-
     private Notification buildLrcNotification(Object data) {
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, Constants.NOTIFICATION_CHANNEL_LRC);
         builder.setSmallIcon(R.drawable.ic_music).setOngoing(true);
@@ -245,7 +243,7 @@ public class MusicListenerService extends NotificationListenerService {
             }
             builder.setContentText("Tap to View Details")
                     .setStyle(new NotificationCompat.BigTextStyle()
-                    .bigText(contentText))
+                            .bigText(contentText))
                     .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                     .setContentIntent(resultPendingIntent);
         } else {
@@ -265,7 +263,7 @@ public class MusicListenerService extends NotificationListenerService {
             builder.setContentTitle("Failed to retrieve current playback media information");
             builder.setContentText("Please check if the target application is correctly configured and if the target application is currently playing media.")
                     .setStyle(new NotificationCompat.BigTextStyle()
-                    .bigText("Please check if the target application is correctly configured and if the target application is currently playing media."))
+                            .bigText("Please check if the target application is correctly configured and if the target application is currently playing media."))
                     .setPriority(NotificationCompat.PRIORITY_DEFAULT);
         }
         Notification notification = builder.build();
@@ -285,11 +283,29 @@ public class MusicListenerService extends NotificationListenerService {
         contentTextResult = String.format("Result: %s - %s", mCurrentResult.getResult().mResultInfo.getTitle(),
                 mCurrentResult.getResult().mResultInfo.getArtist());
         if (mCurrentResult.getResult().mResultInfo.getAlbum() != null) {
-            contentTextResult += " - " +  mCurrentResult.getResult().mResultInfo.getAlbum();
+            contentTextResult += " - " + mCurrentResult.getResult().mResultInfo.getAlbum();
         }
         contentTextResult += "\n" + String.format("Source: %s (%s)", mCurrentResult.getResult().mSource, mCurrentResult.getResult().mOrigin.getCapitalizedName());
         return contentTextResult;
-    }
+    }    private final MediaSessionManager.OnActiveSessionsChangedListener onActiveSessionsChangedListener = new MediaSessionManager.OnActiveSessionsChangedListener() {
+        @Override
+        public void onActiveSessionsChanged(@Nullable List<MediaController> controllers) {
+            if (mMediaController != null) mMediaController.unregisterCallback(mMediaCallback);
+            if (controllers == null) return;
+            for (MediaController controller : controllers) {
+                if (!mTargetPackageList.contains(controller.getPackageName())) continue;
+                if (getMediaControllerPlaybackState(controller) == PlaybackState.STATE_PLAYING) {
+                    mMediaController = controller;
+                    break;
+                }
+            }
+            if (mMediaController != null) {
+                mMediaController.registerCallback(mMediaCallback);
+                mMediaCallback.onMetadataChanged(mMediaController.getMetadata());
+                mMediaCallback.onPlaybackStateChanged(mMediaController.getPlaybackState());
+            }
+        }
+    };
 
     private String notificationLyricsContentText(LyricsChanged.Data data) {
         String contentTextResult = notificationResultContentText(mCurrentResult);
@@ -306,12 +322,13 @@ public class MusicListenerService extends NotificationListenerService {
         try {
             mMediaSessionManager.addOnActiveSessionsChangedListener(onActiveSessionsChangedListener, listener);
             onActiveSessionsChangedListener.onActiveSessionsChanged(mMediaSessionManager.getActiveSessions(listener));
-        } catch (SecurityException ignored){
+        } catch (SecurityException ignored) {
         }
     }
 
     private void unBindMediaListeners() {
-        if (mMediaSessionManager != null) mMediaSessionManager.removeOnActiveSessionsChangedListener(onActiveSessionsChangedListener);
+        if (mMediaSessionManager != null)
+            mMediaSessionManager.removeOnActiveSessionsChangedListener(onActiveSessionsChangedListener);
         if (mMediaController != null) mMediaController.unregisterCallback(mMediaCallback);
         mMediaController = null;
     }
@@ -339,10 +356,11 @@ public class MusicListenerService extends NotificationListenerService {
         lyricsGetterApi.clearLyric();
     }
 
-    public Lyric getLyric(){
+    public Lyric getLyric() {
         return mLyric;
     }
-    public void sync(){
+
+    public void sync() {
         Lyric.Sentence sentence;
         if (translationstatusreferences.getBoolean(musicinfo, false)) {
             mLyric.offset = offsetpreferences.getInt(musicinfo + " ,tran", mLyric.offset);
@@ -355,6 +373,7 @@ public class MusicListenerService extends NotificationListenerService {
         mLyricNotification.tickerText = curLyric;
         mNotificationManager.notify(NOTIFICATION_ID_LRC, mLyricNotification);
     }
+
     private void updateLyric(long position) {
         if (mNotificationManager == null || mLyric == null) {
             return;
@@ -400,7 +419,7 @@ public class MusicListenerService extends NotificationListenerService {
             Log.d("updateLyric: ", String.format("Lyric: %s , delay: %d", curLyric, delay));
             lyricsGetterApi.sendLyric(curLyric, new ExtraData(
                     true,
-                    drawBase64,
+                    getIcon(playPackageName) != null ? getIcon(playPackageName) : drawBase64,
                     false,
                     getPackageName(),
                     delay
@@ -414,7 +433,7 @@ public class MusicListenerService extends NotificationListenerService {
 
     private int calculateDelay(long position) {
         int nextFoundIndex = LyricUtils.getSentenceIndex(mLyric.sentenceList, position, 0, mLyric.offset) + 1;
-        return  nextFoundIndex >= mLyric.sentenceList.size() ? 0 :
+        return nextFoundIndex >= mLyric.sentenceList.size() ? 0 :
                 (int) (mLyric.sentenceList.get(nextFoundIndex)
                         .fromTime - position / 1000) / 3;
     }
@@ -425,7 +444,6 @@ public class MusicListenerService extends NotificationListenerService {
         }
         return null;
     }
-
 
     public static class LrcUpdateThread extends Thread {
         private final Handler handler;
@@ -456,4 +474,14 @@ public class MusicListenerService extends NotificationListenerService {
             handler.sendMessage(message);
         }
     }
+
+
+
+
+
+
+
+
+
+
 }

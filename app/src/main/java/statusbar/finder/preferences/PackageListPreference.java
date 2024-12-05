@@ -15,23 +15,36 @@
  */
 package statusbar.finder.preferences;
 
+
 import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.text.TextUtils;
 import android.util.AttributeSet;
+import android.widget.EditText;
 import android.widget.ListView;
+import android.widget.Toast;
+
 import androidx.preference.Preference;
 import androidx.preference.PreferenceCategory;
+import androidx.preference.PreferenceManager;
+
+import com.google.android.material.textfield.TextInputEditText;
+
 import org.jetbrains.annotations.NotNull;
+
 import statusbar.finder.R;
 import statusbar.finder.livedata.AppsListChanged;
+import statusbar.finder.misc.Constants;
 import statusbar.finder.preferences.PackageListAdapter.PackageItem;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 
 public class PackageListPreference extends PreferenceCategory implements
@@ -42,9 +55,12 @@ public class PackageListPreference extends PreferenceCategory implements
     private final PackageListAdapter mPackageAdapter;
     private final PackageManager mPackageManager;
 
+
     private final Preference mAddPackagePref;
+    private final SharedPreferences mSharedPreferences;
 
     private final ArrayList<String> mPackages = new ArrayList<>();
+    private final Map<String, String> mIcons = new HashMap<>();
 
     public PackageListPreference(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -53,6 +69,8 @@ public class PackageListPreference extends PreferenceCategory implements
         mPackageManager = mContext.getPackageManager();
         mPackageAdapter = new PackageListAdapter(mContext);
         mAddPackagePref = makeAddPref();
+        mSharedPreferences = PreferenceManager.getDefaultSharedPreferences(mContext);
+
         this.setOrderingAsAdded(false);
     }
 
@@ -121,9 +139,17 @@ public class PackageListPreference extends PreferenceCategory implements
         }
     }
 
+
     private void removePackageFromList(String packageName) {
         mPackages.remove(packageName);
         savePackagesList();
+    }
+
+    private void savePackageIconList() {
+        mSharedPreferences.edit().remove(Constants.PREFERENCE_KEY_PACKAGES_ICONS).apply();
+        StringBuilder valueBuilder = new StringBuilder();
+        mIcons.forEach((key, value) -> valueBuilder.append(key).append(":").append(value).append(";"));
+        mSharedPreferences.edit().putString(Constants.PREFERENCE_KEY_PACKAGES_ICONS, valueBuilder.toString()).apply();
     }
 
     @Override
@@ -150,13 +176,28 @@ public class PackageListPreference extends PreferenceCategory implements
             dialog.show();
         } else if (preference == findPreference(preference.getKey())) {
             builder.setTitle(R.string.dialog_delete_title)
-                .setMessage(R.string.dialog_delete_message)
-                .setIconAttribute(android.R.attr.alertDialogIcon)
-                .setPositiveButton(android.R.string.ok, (dialog, which) -> {
-                    removePackageFromList(preference.getKey());
-                    removePreference(preference);
-                })
-                .setNegativeButton(android.R.string.cancel, null).show();
+                    .setMessage(R.string.dialog_delete_message)
+                    .setIconAttribute(android.R.attr.alertDialogIcon)
+                    .setPositiveButton(android.R.string.ok, (dialog, which) -> {
+                        removePackageFromList(preference.getKey());
+                        removePreference(preference);
+                    })
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setNeutralButton("添加图标", (dialog, which) -> {
+                        dialog.cancel();
+                        EditText editText = new EditText(mContext);
+                        AlertDialog.Builder dialogBuilder = new AlertDialog.Builder(mContext)
+                                .setTitle("填入base64")
+                                .setView(editText)
+                                .setPositiveButton(android.R.string.ok, (dialog1, which1) -> {
+                                    mIcons.put(preference.getKey(), editText.getText().toString());
+                                    savePackageIconList();
+
+                                })
+                                .setNegativeButton(android.R.string.cancel, null);
+                        dialogBuilder.show();
+                    })
+                    .show();
         }
         return true;
     }
